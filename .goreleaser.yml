@@ -1,0 +1,74 @@
+# .goreleaser.yml
+version: 2 # Specifies the configuration format version
+project_name: nextr4y
+
+# This is an example goreleaser.yaml file with some sane defaults.
+# Make sure to check the documentation at http://goreleaser.com
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/nextr4y/
+    binary: nextr4y
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Don't build windows/arm64 by default
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - # Default format is tar.gz
+    formats:
+      - tar.gz
+    # this name template makes the OS and Arch compatible with goreleaser
+    # installs via github releaser, but may not be needed unless you use it
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+    files:
+      - LICENSE
+      - README.md
+    format_overrides:
+      - goos: windows
+        # Override format to zip for windows
+        formats:
+          - zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+# Removed deprecated snapshot block
+# snapshot:
+#   name_template: "{{ incpatch .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  # Drafts the release on github. You need to manually publish it then.
+  draft: true
+  # Prerelease based on the tag name (if it contains -rc, -beta, etc)
+  prerelease: auto
+
+# signs:
+#   - artifacts: checksum
+#     cmd: gpg
+#     args:
+#       - --detach-sign
+#       - --armor
+#     signature: "${artifact}.sig"
+#     output: true 

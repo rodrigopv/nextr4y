@@ -1,0 +1,33 @@
+# .github/workflows/release.yml
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*.*.*' # Triggers on tags like v0.1.0, v1.0.0, etc.
+
+# Need write permissions to create releases and upload assets
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required for GoReleaser changelog generation
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24' # Match your project's go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
