@@ -18,7 +18,7 @@
 
 ---
 
-**nextr4y** is a powerful reconnaissance tool written in Golang designed to analyze Next.js applications and extract valuable information about their internal structure, routes, and dependencies. By scanning a target Next.js site, nextr4y can reveal build IDs, Next.js and React versions, asset prefixes, and route mappings that can be valuable for security assessments, debugging, or reverse engineering. Built with performance and reliability in mind, this Go-based tool is perfect for cybersecurity professionals and web application researchers.
+**nextr4y** is a powerful reconnaissance tool written in Golang designed to analyze Next.js applications and extract valuable information about their internal structure, routes, and dependencies. By scanning a target Next.js site, nextr4y can reveal build IDs, Next.js and React versions, asset prefixes, and route mappings that can be valuable for security assessments, debugging, or reverse engineering. It also features an MCP server mode for remote scanning and integration. Built with performance and reliability in mind, this Go-based tool is perfect for cybersecurity professionals and web application researchers.
 
 ## Features
 
@@ -29,6 +29,7 @@
 - 🔧 **Build Manifest Analysis** - Extract and analyze the build manifest
 - 📊 **Multiple Output Formats** - Get results in human-readable text or machine-parsable JSON
 - 🔒 **Anti-Bot Evasion** - Uses CycleTLS-based page fetcher with different JA3 fingerprints and user agent presets to avoid bot detection
+- 🌐 **MCP Server Mode** - Expose scanning functionality via a Model Context Protocol server for remote access and integration (e.g., with Cursor)
 
 ## Installation
 
@@ -56,16 +57,35 @@ Download pre-built binaries from the [Releases](https://github.com/rodrigopv/nex
 ## Usage
 
 ```
-nextr4y [command options] <target_url>
+nextr4y [command] [command options] [arguments...]
 ```
 
-### Options
+### Commands
+
+```
+COMMANDS:
+   scan    Scan a Next.js site
+   serve   Start an MCP server to handle nextr4y scan requests
+   help    Shows a list of commands or help for one command
+```
+
+### Scan Command Options
 
 ```
 OPTIONS:
    --output FILE, -o FILE  Write output to FILE
    --format value, -f value  Output format (text or json) (default: "text")
+   --base-url value, -b value  Override the auto-detected base URL for asset resolution
    --help, -h              Show help information
+```
+
+### Serve Command Options
+
+```
+OPTIONS:
+   --port value, -p value  Port for the MCP server (default: 8080)
+   --host value           Host for the MCP server (default: "0.0.0.0")
+   --help, -h             Show help information
 ```
 
 ## Examples
@@ -80,6 +100,18 @@ nextr4y https://example-nextjs-site.com
 
 ```bash
 nextr4y -f json -o results.json https://vercel.com
+```
+
+### Custom Base URL
+
+```bash
+nextr4y -b https://cdn.example.com https://example.com
+```
+
+### Starting the MCP Server
+
+```bash
+nextr4y serve -p 9000 -host 127.0.0.1
 ```
 
 ### Sample Output (Text Format)
@@ -161,12 +193,69 @@ nextr4y works by:
 5. **Version Detection** - Uses multiple strategies to fingerprint Next.js and React versions
 6. **Report Generation** - Compiles discovered data into structured output
 7. **Bot Detection Evasion** - Implements CycleTLS for TLS fingerprint randomization with various JA3 signatures and rotating user agents to bypass common bot detection systems
+8. **MCP Server Mode** - Provides a Model Context Protocol server interface to execute scans remotely
+
+## MCP Server
+
+The MCP (Message Context Protocol) server mode allows nextr4y to be used as a service that accepts scan requests remotely. This is useful for:
+
+- **Integration** - Incorporate nextr4y scanning into your own applications or workflows
+- **Automation** - Schedule and automate scans of Next.js sites
+- **API Access** - Access nextr4y functionality through a standardized API interface
+- **AI Integration Bridge** - Serve as a bridge between the data provided by nextr4y and AI-driven tools or solutions (like Cursor) for enhanced analysis and interaction.
+
+When using the MCP server, clients can send requests to scan specific targets and receive the scan results as structured responses. The server handles the execution of the scans and returns the results to the client.
+
+### Using the MCP Server
+
+Start the MCP server:
+
+```bash
+nextr4y serve -p 8080 -host 0.0.0.0
+```
+
+#### Available Tools
+
+The MCP server provides the following tools:
+
+- **nextr4y_scan** - Scan a Next.js site and extract information about its structure
+  - Parameters:
+    - `url` (string, required) - The URL of the target Next.js site
+    - `format` (string, optional) - Output format ("json" or "text", defaults to "json")
+    - `base_url` (string, optional) - Custom base URL for asset resolution
+
+### Using with Cursor
+
+You can integrate nextr4y with Cursor IDE using the MCP protocol:
+
+1. Start the nextr4y MCP server:
+
+```bash
+go run github.com/rodrigopv/nextr4y/cmd/nextr4y serve
+```
+
+2. Create or edit the Cursor MCP configuration file at `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "nextr4y": {
+      "url": "http://localhost:8080/sse"
+    }
+  }
+}
+```
+
+3. Restart Cursor for the changes to take effect.
+
+4. You can now use nextr4y from within Cursor to scan Next.js sites and analyze their structure.
 
 ## Use Cases
 
 - **Security Research** - Reconnaissance and analysis of Next.js application structure
 - **Penetration Testing** - Map routes and identify potential API endpoints
 - **Website Analysis** - Learn how sites are built and structured with Next.js
+- **Internal View Reconstruction** - Use MCP to connect nextr4y data (routes, assets) to IDEs such as cursor to understand or mimic internal application views for deeper analysis or vulnerability hunting.
 
 ## Contributing
 
