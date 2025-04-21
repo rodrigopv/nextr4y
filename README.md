@@ -31,6 +31,10 @@
 - 🔒 **Anti-Bot Evasion** - Uses CycleTLS-based page fetcher with different JA3 fingerprints and user agent presets to avoid bot detection
 - 🌐 **MCP Server Mode** - Expose scanning functionality via a Model Context Protocol server for remote access and integration (e.g., with Cursor)
 
+
+## Sample scan
+<img src="docs/samplescan.png" alt="nextr4y scan example" />
+
 ## Installation
 
 ### From Source
