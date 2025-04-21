@@ -10,6 +10,7 @@
 <p align="center">
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
+  <a href="#using-with-devbox">Using with Devbox</a> •
   <a href="#usage">Usage</a> •
   <a href="#examples">Examples</a> •
   <a href="#contributing">Contributing</a> •
@@ -57,6 +58,47 @@ go install github.com/rodrigopv/nextr4y/cmd/nextr4y@latest
 ### Pre-built Binaries
 
 Download pre-built binaries from the [Releases](https://github.com/rodrigopv/nextr4y/releases) page.
+
+## Using with Devbox
+
+[Devbox](https://www.jetify.com/devbox/) provides a consistent development environment with all dependencies pre-configured. This ensures that everyone using the project has the same tooling and versions, eliminating "works on my machine" issues.
+
+### Installing Devbox
+
+```bash
+# Follow the official installation instructions at:
+# https://www.jetify.com/devbox/docs/installing_devbox/
+```
+
+### Using nextr4y with Devbox
+
+After installing Devbox, you can run nextr4y without installing Go or any other dependencies:
+
+```bash
+# Clone and enter the repository
+git clone https://github.com/rodrigopv/nextr4y
+cd nextr4y
+
+# Build the binary
+devbox run build
+
+# Run a scan
+devbox run scan https://example-nextjs-site.com
+
+# Run a scan with JSON output
+devbox run scan:json https://example-nextjs-site.com
+
+# Start the MCP server
+devbox run serve
+```
+
+### Available Devbox Commands
+
+- `devbox run build` - Build the nextr4y binary
+- `devbox run test` - Run all tests
+- `devbox run lint` - Run linter
+- `devbox run scan [url]` - Scan a Next.js site
+- `devbox run serve` - Start the MCP server
 
 ## Usage
 

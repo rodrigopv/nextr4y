@@ -1,4 +1,11 @@
-# Binaries for programs and plugins
+# Devbox
+.devbox/
+
+# Binaries
+bin/
+dist/
+
+# Go
 *.exe
 *.exe~
 *.dll
