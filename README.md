@@ -80,6 +80,7 @@ OPTIONS:
    --output FILE, -o FILE  Write output to FILE
    --format value, -f value  Output format (text or json) (default: "text")
    --base-url value, -b value  Override the auto-detected base URL for asset resolution
+   --insecure, -k          Skip TLS certificate verification (default: false)
    --help, -h              Show help information
 ```
 
@@ -111,6 +112,18 @@ nextr4y -f json -o results.json https://vercel.com
 ```bash
 nextr4y -b https://cdn.example.com https://example.com
 ```
+
+### Skipping TLS Certificate Verification
+
+```bash
+nextr4y --insecure https://self-signed-site.com
+```
+
+> ⚠️ **Security caveat:** `--insecure` / `-k` disables TLS certificate
+> validation entirely, so expired, self-signed and hostname-mismatched
+> certificates are accepted and the connection is vulnerable to
+> man-in-the-middle interception. Use it only against trusted or known targets
+> such as CTF and lab environments. Verification stays **on** by default.
 
 ### Starting the MCP Server
 
