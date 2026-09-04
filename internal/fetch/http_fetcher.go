@@ -33,14 +33,28 @@ var defaultProfiles = []tlsProfile{
 type HTTPFetcher struct {
 	client   cycletls.CycleTLS
 	profiles []tlsProfile
+	// insecureSkipVerify disables TLS certificate verification for every request
+	// made by this fetcher. It only affects certificate validation; JA3
+	// fingerprints, headers and redirect handling are unchanged.
+	insecureSkipVerify bool
 }
 
 // NewHTTPFetcher creates a new HTTPFetcher with default cycleTLS settings and profiles.
+// TLS certificate verification is enabled.
 func NewHTTPFetcher() *HTTPFetcher {
+	return NewHTTPFetcherWithOptions(false)
+}
+
+// NewHTTPFetcherWithOptions creates a new HTTPFetcher with default cycleTLS
+// settings and profiles. When insecureSkipVerify is true the fetcher accepts
+// any TLS certificate presented by the server, including self-signed and
+// expired ones. This should only be used against trusted targets.
+func NewHTTPFetcherWithOptions(insecureSkipVerify bool) *HTTPFetcher {
 	client := cycletls.Init()
 	return &HTTPFetcher{
-		client:   client,
-		profiles: defaultProfiles,
+		client:             client,
+		profiles:           defaultProfiles,
+		insecureSkipVerify: insecureSkipVerify,
 	}
 }
 
@@ -58,10 +72,11 @@ func (f *HTTPFetcher) Fetch(targetURL string) (io.ReadCloser, string, error) {
 
 	for i, profile := range f.profiles {
 		options := cycletls.Options{
-			Body:      "",
-			Ja3:       profile.ja3,
-			UserAgent: profile.userAgent,
-			Headers:   map[string]string{},
+			Body:               "",
+			Ja3:                profile.ja3,
+			UserAgent:          profile.userAgent,
+			Headers:            map[string]string{},
+			InsecureSkipVerify: f.insecureSkipVerify,
 		}
 
 		resp, err := f.client.Do(targetURL, options, "GET")

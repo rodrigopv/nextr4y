@@ -72,6 +72,7 @@ func scanAction(c *cli.Context) error {
 	outputFile := c.String("output")
 	outputFormat := c.String("format")
 	customBaseURL := c.String("base-url")
+	insecure := c.Bool("insecure")
 
 	if outputFormat != "text" && outputFormat != "json" {
 		return cli.Exit(fmt.Sprintf("Error: Invalid output format '%s'. Use 'text' or 'json'.", outputFormat), 1)
@@ -82,8 +83,12 @@ func scanAction(c *cli.Context) error {
 		log.Printf("Using custom base URL: %s", customBaseURL)
 	}
 
+	if insecure {
+		fmt.Fprintln(os.Stderr, "⚠️  WARNING: TLS certificate verification disabled (--insecure)")
+	}
+
 	// Create the fetcher and scanner instances
-	fetcher := fetch.NewHTTPFetcher()
+	fetcher := fetch.NewHTTPFetcherWithOptions(insecure)
 	versionDetector := &versiondetect.HeuristicAssetScannerDetector{}
 	scr := scanner.NewScanner(fetcher, versionDetector, customBaseURL) // Pass the custom base URL
 
@@ -164,6 +169,12 @@ func main() {
 			Value:   "", // Default is empty (use auto-detection)
 			Usage:   "Override the auto-detected base URL for asset resolution",
 		},
+		&cli.BoolFlag{
+			Name:    "insecure",
+			Aliases: []string{"k"},
+			Value:   false, // Default is to verify TLS certificates
+			Usage:   "Skip TLS certificate verification (self-signed or expired certs)",
+		},
 	}
 
 	// Serve command flags
@@ -216,6 +227,7 @@ func main() {
    nextr4y scan https://example.com
    nextr4y scan -f json -o results.json https://vercel.com
    nextr4y scan -b https://cdn.example.com https://example.com
+   nextr4y scan --insecure https://self-signed-site.com
    nextr4y serve -p 8080
 `)
 
