@@ -1,0 +1,71 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.0/.schema/devbox.schema.json",
+  "packages": [
+    "go@latest",
+    "golangci-lint@latest",
+    "gopls@latest",
+    "delve@latest",
+    "air@latest"
+  ],
+  "shell": {
+    "scripts": {
+      "test": [
+        "echo 'Running tests...'",
+        "go test ./...",
+        "echo 'Tests completed.'"
+      ],
+      "build": [
+        "echo 'Building nextr4y binary...'",
+        "mkdir -p bin",
+        "go build -v -o bin/nextr4y cmd/nextr4y/main.go",
+        "echo 'Build completed. Binary location: ./bin/nextr4y'"
+      ],
+      "run": [
+        "echo 'Running nextr4y...'",
+        "go run cmd/nextr4y/main.go"
+      ],
+      "lint": [
+        "echo 'Running linter...'",
+        "golangci-lint run",
+        "echo 'Linting completed.'"
+      ],
+      "install": [
+        "echo 'Installing nextr4y to GOPATH...'",
+        "go install ./cmd/nextr4y",
+        "echo 'Installation completed.'"
+      ],
+      "scan": [
+        "echo 'Scanning target: $1'",
+        "go run cmd/nextr4y/main.go scan $1"
+      ],
+      "scan:json": [
+        "echo 'Scanning target with JSON output: $1'",
+        "go run cmd/nextr4y/main.go scan -f json $1"
+      ],
+      "scan:output": [
+        "echo 'Scanning target in format $1, output to $2: $3'",
+        "go run cmd/nextr4y/main.go scan -f $1 -o $2 $3"
+      ],
+      "serve": [
+        "echo 'Starting MCP server on default port 8080...'",
+        "go run cmd/nextr4y/main.go serve"
+      ],
+      "serve:custom": [
+        "echo 'Starting MCP server on port $1, host $2...'",
+        "go run cmd/nextr4y/main.go serve -p $1 -host $2"
+      ],
+      "help": [
+        "echo 'nextr4y Development Environment Help'",
+        "echo ''",
+        "echo 'Available commands:'",
+        "echo '  devbox run build      - Build the nextr4y binary'",
+        "echo '  devbox run test       - Run all tests'",
+        "echo '  devbox run lint       - Run linter'",
+        "echo '  devbox run scan [url] - Scan a Next.js site'",
+        "echo '  devbox run serve      - Start the MCP server'",
+        "echo ''",
+        "echo 'See README.md for more information about nextr4y'"
+      ]
+    }
+  }
+}
