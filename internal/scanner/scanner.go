@@ -1,697 +1,369 @@
 package scanner
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
+	"net/http"
 	"net/url"
-	"os"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
+	"time"
 
-	"github.com/PuerkitoBio/goquery"
-	"github.com/dop251/goja"
-	"github.com/fatih/color"
-
+	"github.com/rodrigopv/nextr4y/internal/chunkmap"
 	"github.com/rodrigopv/nextr4y/internal/fetch"
 	"github.com/rodrigopv/nextr4y/internal/versiondetect"
 )
 
-// Structure to hold extracted Next.js config data
-type NextData struct {
-	BuildID     string                 `json:"buildId"`
-	AssetPrefix string                 `json:"assetPrefix"` 
-	Props       map[string]interface{} `json:"props"`      
+type PageObservation struct {
+	RequestedURL string
+	FinalURL     string
+	Technique    string
+	HTTPStatus   int
+	BuildID      string
+	AssetPrefix  string
+	Assets       []string
 }
-
-// Structure to hold the final results
+type ManifestObservation struct {
+	URL        string
+	HTTPStatus int
+	Status     string
+	Routes     int
+}
 type ScanResult struct {
-	BaseURL         string
-	AssetBaseURL    string 
-	IsNextJS        bool
-	BuildID         string
-	AssetPrefix     string
-	Routes          map[string][]string 
-	AllAssets       map[string]bool     
-	ManifestFound   bool
-	ManifestExecOK  bool
-	ExecutionError  error
-	NextDataJSONRaw string 
-	DetectedNextVersion string
-	DetectedReactVersion string
+	ChunkMaps               []chunkmap.Inventory
+	PageObservations        []PageObservation
+	Manifests               []ManifestObservation
+	ManifestAssets          map[string]bool
+	RouteSources            map[string][]string
+	ServingPlatforms        []string
+	observation             *PageObservation
+	BaseURL                 string
+	AssetBaseURL            string
+	IsNextJS                bool
+	DetectionStatus         string
+	ScanStatus              string
+	BuildID                 string
+	AssetPrefix             string
+	ObservedAssetPrefixes   []string
+	Router                  string
+	Bundler                 string
+	Adapter                 string
+	Platform                string
+	DeploymentID            string
+	Routes                  map[string][]string
+	DiscoveredURLs          []string
+	AllAssets               map[string]bool
+	ManifestFound           bool
+	ManifestExecOK          bool
+	ManifestStatus          string
+	ExecutionError          error `json:"-"`
+	NextDataJSONRaw         string
+	DetectedNextVersion     string
+	DetectedReactVersion    string
+	HTTPStatus              int
+	ResponseHeaders         http.Header
+	Redirects               []fetch.Redirect
+	TLSVerificationDisabled bool
+	Findings                []versiondetect.Finding
+	Warnings                []string
 }
-
-// Scanner encapsulates the dependencies and logic for scanning a Next.js site.
+type Options struct {
+	ProbeRSC       bool
+	DiscoverRoutes bool
+	CrawlPages     int
+}
 type Scanner struct {
 	fetcher         fetch.Fetcher
 	versionDetector versiondetect.VersionDetector
-	customBaseURL   string // Custom base URL provided by CLI parameter
+	customBaseURL   string
+	Options         Options
 }
 
-// NewScanner creates a new Scanner with the required dependencies.
-func NewScanner(fetcher fetch.Fetcher, detector versiondetect.VersionDetector, customBaseURL string) *Scanner {
-	return &Scanner{
-		fetcher:         fetcher,
-		versionDetector: detector,
-		customBaseURL:   customBaseURL,
-	}
+func NewScanner(f fetch.Fetcher, d versiondetect.VersionDetector, custom string) *Scanner {
+	return &Scanner{fetcher: f, versionDetector: d, customBaseURL: custom}
 }
-
-const userAgent = "go-nextr4y/1.0"
-
-var manifestJSRegex = regexp.MustCompile(`self\.__BUILD_MANIFEST\s*=\s*(function\s*\(.*?\)\s*\{[\s\S]*?return\s*\{[\s\S]*?\}\s*\}\s*\(.*?\))`)
-var simpleVersionRegex = regexp.MustCompile(`["'](\d+\.\d+\.\d+[^"']*)["']`)
-
-// findInitialScriptURLs parses HTML content to find <script> tags pointing to Next.js JS chunks.
-// It resolves the URLs relative to the provided assetBaseURL.
-func findInitialScriptURLs(htmlContent string, assetBaseURL *url.URL) map[string]bool {
-	jsURLs := make(map[string]bool)
-	if assetBaseURL == nil {
-		log.Println("Warning: Cannot resolve initial script URLs without an asset base URL.")
-		return jsURLs
+func (s *Scanner) ScanTarget(target string) (*ScanResult, error) {
+	if !strings.Contains(target, "://") {
+		target = "https://" + target
 	}
-
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	r := &ScanResult{BaseURL: target, DetectionStatus: "unknown", ScanStatus: "failed", Router: "Unknown", Bundler: "Unknown", Adapter: "Unknown", Platform: "Unknown", DetectedNextVersion: "Unknown", DetectedReactVersion: "Unknown", ManifestStatus: "not_applicable", Routes: map[string][]string{}, AllAssets: map[string]bool{}}
+	started := time.Now()
+	log.Printf("Scan: fetching initial page %s", target)
+	defer func() {
+		log.Printf("Scan: %s in %s; detection=%s, Next.js=%s, React=%s, assets=%d, warnings=%d", r.ScanStatus, time.Since(started).Round(time.Millisecond), r.DetectionStatus, r.DetectedNextVersion, r.DetectedReactVersion, len(r.AllAssets), len(r.Warnings))
+		if r.ExecutionError != nil {
+			log.Printf("Scan: failed: %v", r.ExecutionError)
+		}
+	}()
+	res, err := fetch.Read(s.fetcher, fetch.Request{URL: target})
+	if res != nil {
+		r.BaseURL = res.URL
+		r.HTTPStatus = res.StatusCode
+		r.ResponseHeaders = res.Headers
+		r.Redirects = res.Redirects
+		r.TLSVerificationDisabled = res.TLSVerificationDisabled
+		log.Printf("Initial page: HTTP %d, %d bytes, final URL %s", res.StatusCode, len(res.Body), res.URL)
+		r.inspectHeaders(res)
+	}
 	if err != nil {
-		log.Printf("Warning: Failed to parse HTML for initial scripts: %v", err)
-		return jsURLs
+		r.ExecutionError = err
+		r.resolve()
+		return r, err
 	}
-
-	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
-		src, exists := s.Attr("src")
-		if !exists || src == "" {
+	base, err := url.Parse(res.URL)
+	if err != nil {
+		r.ExecutionError = err
+		return r, err
+	}
+	r.ScanStatus = "complete"
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		r.ScanStatus = "partial"
+		r.warn(fmt.Sprintf("initial response HTTP %d", res.StatusCode))
+	}
+	assetBase := *base
+	assetBase.RawQuery = ""
+	assetBase.Fragment = ""
+	assetBase.Path = ""
+	assetBase.RawPath = ""
+	data, raw, dataErr := findAndParseNextData(strings.NewReader(string(res.Body)))
+	r.NextDataJSONRaw = raw
+	if errors.Is(dataErr, ErrNextDataMissing) {
+		log.Println("Next data: __NEXT_DATA__ absent; continuing with independent App Router and asset techniques")
+	} else if dataErr == nil {
+		log.Printf("Next data: parsed __NEXT_DATA__, build ID %s", data.BuildID)
+	}
+	if dataErr != nil && !errors.Is(dataErr, ErrNextDataMissing) {
+		r.warn(dataErr.Error())
+	}
+	if data != nil {
+		r.add("framework", "nextjs", "next-data", "high", res.URL, "__NEXT_DATA__")
+		r.add("router", "pages", "next-data", "high", res.URL, "__NEXT_DATA__")
+		r.AssetPrefix = data.AssetPrefix
+		if data.BuildID != "" {
+			r.add("build-id", data.BuildID, "next-data", "high", res.URL, "buildId")
+		}
+		if data.AssetPrefix != "" {
+			prefix, e := base.Parse(data.AssetPrefix)
+			if e == nil {
+				assetBase = *prefix
+			}
+		}
+	}
+	customAssets := false
+	if s.customBaseURL != "" {
+		custom, e := url.Parse(s.customBaseURL)
+		if e != nil || custom.Host == "" || (custom.Scheme != "http" && custom.Scheme != "https") {
+			r.warn("invalid asset base override; using detected asset base")
+		} else {
+			assetBase = *custom
+			customAssets = true
+			// Preserve a declared prefix when overriding the serving origin.
+			if r.AssetPrefix != "" {
+				if prefix, e := url.Parse(r.AssetPrefix); e == nil && prefix.Path != "" && !strings.HasSuffix(assetBase.Path, prefix.Path) {
+					assetBase.Path = path.Join(assetBase.Path, prefix.Path)
+				}
+			}
+			assetBase.RawQuery = ""
+			assetBase.Fragment = ""
+			assetBase.RawPath = ""
+		}
+	}
+	r.AssetBaseURL = strings.TrimRight(assetBase.String(), "/")
+	log.Printf("HTML: inspecting assets and inline Flight; asset base %s", r.AssetBaseURL)
+	r.beginObservation(target, res, "html")
+	r.inspectHTML(string(res.Body), base, &assetBase, customAssets)
+	r.endObservation()
+	log.Printf("HTML: discovered %d assets and %d same-origin URLs", len(r.AllAssets), len(r.DiscoveredURLs))
+	if strings.Contains(res.Headers.Get("Content-Type"), "text/x-component") {
+		r.beginObservation(target, res, "rsc")
+		r.inspectFlight(string(res.Body), base, &assetBase, customAssets, "rsc")
+		r.endObservation()
+	}
+	if s.Options.ProbeRSC {
+		log.Printf("RSC: probing %s with RSC: 1", base.String())
+		probeURL := *base
+		q := probeURL.Query()
+		q.Set("_rsc", "nextr4y")
+		probeURL.RawQuery = q.Encode()
+		probe, e := fetch.Read(s.fetcher, fetch.Request{URL: probeURL.String(), Headers: http.Header{"Rsc": []string{"1"}}})
+		if e != nil {
+			r.warn("RSC probe: " + e.Error())
+		} else if strings.Contains(probe.Headers.Get("Content-Type"), "text/x-component") {
+			log.Printf("RSC: received HTTP %d, %d bytes of Flight data", probe.StatusCode, len(probe.Body))
+			r.inspectHeaders(probe)
+			u, _ := url.Parse(probe.URL)
+			r.beginObservation(base.String(), probe, "rsc")
+			r.inspectFlight(string(probe.Body), u, &assetBase, customAssets, "rsc")
+			r.endObservation()
+		} else {
+			r.warn(fmt.Sprintf("RSC probe returned HTTP %d %s", probe.StatusCode, probe.Headers.Get("Content-Type")))
+		}
+	}
+	r.resolve()
+	if r.AssetPrefix != "" {
+		if prefix, e := base.Parse(r.AssetPrefix); e == nil {
+			if !customAssets {
+				assetBase = *prefix
+			} else if prefix.Path != "" && !strings.HasSuffix(assetBase.Path, prefix.Path) {
+				assetBase.Path = path.Join(assetBase.Path, prefix.Path)
+			}
+			r.AssetBaseURL = strings.TrimRight(assetBase.String(), "/")
+		}
+	}
+	// Keep the current page's asset scope for fingerprinting. Enumerating a
+	// manifest must not trigger hundreds of downloads of unrelated pages.
+	pageAssets := map[string]bool{}
+	for u := range r.AllAssets {
+		pageAssets[u] = true
+	}
+	s.probeManifests(r, base)
+	log.Printf("Manifest: %s; %d routes mapped", r.ManifestStatus, len(r.Routes))
+	js := map[string]bool{}
+	for _, assets := range []map[string]bool{pageAssets, r.ManifestAssets} {
+		for u := range assets {
+			parsed, e := url.Parse(u)
+			if e == nil && strings.HasSuffix(parsed.Path, ".js") {
+				js[u] = true
+			}
+		}
+		if len(js) > 0 {
+			break
+		}
+	}
+	log.Printf("Versions: inspecting %d JavaScript assets", len(js))
+	if detailed, ok := s.versionDetector.(versiondetect.DetailedDetector); ok {
+		report := detailed.DetectEvidence(js, s.fetcher)
+		r.Findings = append(r.Findings, report.Findings...)
+		r.ChunkMaps = append(r.ChunkMaps, report.ChunkMaps...)
+		for _, warning := range report.Warnings {
+			r.warn(warning)
+		}
+	} else if s.versionDetector != nil {
+		n, react := s.versionDetector.Detect(r.BuildID, js, &assetBase, s.fetcher)
+		for prop, value := range map[string]string{"next-version": n, "react-version": react} {
+			if value != "" && value != "Unknown" {
+				r.add(prop, value, "legacy-detector", "medium", res.URL, "legacy detector result")
+			}
+		}
+	}
+	if s.Options.DiscoverRoutes {
+		log.Printf("Sitemap: probing %s/sitemap.xml", base.Scheme+"://"+base.Host)
+		s.discover(r, base)
+		log.Printf("Sitemap: discovery finished; %d total URLs", len(r.DiscoveredURLs))
+	}
+	if s.Options.CrawlPages > 0 {
+		s.crawl(r, base)
+	}
+	r.resolve()
+	if len(r.Warnings) > 0 {
+		r.ScanStatus = "partial"
+	}
+	if !r.IsNextJS && res.StatusCode >= 200 && res.StatusCode < 300 && r.ScanStatus == "complete" {
+		r.DetectionStatus = "not_detected"
+	}
+	sort.Strings(r.Warnings)
+	sort.Strings(r.DiscoveredURLs)
+	sort.Strings(r.ObservedAssetPrefixes)
+	return r, nil
+}
+func (r *ScanResult) add(property, value, technique, confidence, u, evidence string) {
+	for _, f := range r.Findings {
+		if f.Property == property && f.Value == value && f.Technique == technique && f.URL == u {
 			return
 		}
+	}
+	if technique != "assets" {
+		log.Printf("Detection (%s): %s=%s [%s]", technique, property, value, confidence)
+	}
+	r.Findings = append(r.Findings, versiondetect.Finding{Property: property, Value: value, Technique: technique, Confidence: confidence, URL: u, Evidence: evidence})
+}
+func (r *ScanResult) resolve() {
+	r.ServingPlatforms = nil
+	for _, f := range r.Findings {
+		if f.Property == "platform" && !contains(r.ServingPlatforms, f.Value) {
+			r.ServingPlatforms = append(r.ServingPlatforms, f.Value)
+		}
+	}
+	sort.Strings(r.ServingPlatforms)
+	r.Platform = "Unknown"
+	if len(r.ServingPlatforms) > 0 {
+		r.Platform = strings.Join(r.ServingPlatforms, ", ")
+	}
 
-		if strings.Contains(src, "/_next/static/") {
-			srcURL, err := url.Parse(src)
-			if err != nil {
-				log.Printf("Warning: Could not parse script src '%s': %v", src, err)
-				return
-			}
-
-			if strings.HasSuffix(srcURL.Path, ".js") {
-				fullURL := assetBaseURL.ResolveReference(srcURL).String()
-				jsURLs[fullURL] = true
+	for property, dst := range map[string]*string{"next-version": &r.DetectedNextVersion, "react-version": &r.DetectedReactVersion, "router": &r.Router, "bundler": &r.Bundler, "adapter": &r.Adapter, "build-id": &r.BuildID, "deployment-id": &r.DeploymentID} {
+		value, conflict := versiondetect.Resolve(r.Findings, property)
+		if conflict && property == "router" {
+			value = "mixed"
+			conflict = false
+		}
+		if conflict {
+			warning := "conflicting " + property + " evidence"
+			if !contains(r.Warnings, warning) {
+				r.warn(warning)
 			}
 		}
-	})
-
-	log.Printf("Found %d potential initial JS chunk URLs in HTML (resolved against asset base).", len(jsURLs))
-	return jsURLs
+		if value == "Unknown" && (property == "build-id" || property == "deployment-id") {
+			value = ""
+		}
+		*dst = value
+	}
+	for _, f := range r.Findings {
+		if f.Property == "framework" && f.Value == "nextjs" || f.Property == "next-version" && f.Confidence == "high" {
+			r.IsNextJS = true
+			r.DetectionStatus = "detected"
+		}
+	}
+}
+func contains(values []string, value string) bool {
+	for _, v := range values {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+func (r *ScanResult) inspectHeaders(res *fetch.Response) {
+	h := res.Headers
+	if strings.Contains(strings.ToLower(h.Get("X-Powered-By")), "next.js") {
+		r.add("framework", "nextjs", "headers", "high", res.URL, "x-powered-by: "+h.Get("X-Powered-By"))
+	}
+	if h.Get("X-Opennext") != "" || h.Get("X-Opennext-Cache") != "" {
+		r.add("adapter", "opennext", "headers", "high", res.URL, "x-opennext: "+h.Get("X-Opennext")+"; x-opennext-cache: "+h.Get("X-Opennext-Cache"))
+	}
+	if strings.EqualFold(h.Get("Server"), "cloudflare") || h.Get("Cf-Ray") != "" {
+		r.add("platform", "cloudflare", "headers", "high", res.URL, "Cloudflare serving infrastructure")
+	}
+	if strings.EqualFold(h.Get("Server"), "vercel") || h.Get("X-Vercel-Id") != "" {
+		r.add("platform", "vercel", "headers", "high", res.URL, "Vercel serving infrastructure")
+	}
 }
 
-// findAndParseNextData finds the __NEXT_DATA__ script and parses its JSON content.
-func findAndParseNextData(htmlBody io.Reader) (*NextData, string, error) {
-	doc, err := goquery.NewDocumentFromReader(htmlBody)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to parse HTML: %w", err)
-	}
-
-	jsonData := ""
-	doc.Find("script#__NEXT_DATA__").Each(func(i int, s *goquery.Selection) {
-		jsonData = s.Text()
-	})
-
-	if jsonData == "" {
-		return nil, "", errors.New("__NEXT_DATA__ script tag not found")
-	}
-
-	var nextData NextData
-	err = json.Unmarshal([]byte(jsonData), &nextData)
-	if err != nil {
-		return nil, jsonData, fmt.Errorf("failed to unmarshal __NEXT_DATA__ JSON: %w", err)
-	}
-
-	if nextData.BuildID == "" || nextData.Props == nil {
-		return &nextData, jsonData, errors.New("__NEXT_DATA__ found, but missing expected fields (buildId, props)")
-	}
-
-	return &nextData, jsonData, nil
+func (r *ScanResult) warn(message string) {
+	log.Printf("Warning: %s", message)
+	r.Warnings = append(r.Warnings, message)
 }
 
-// executeManifestJS runs the manifest JS using goja.
-func executeManifestJS(manifestJS string) (map[string]interface{}, error) {
-	matches := manifestJSRegex.FindStringSubmatch(manifestJS)
-	if len(matches) < 2 {
-		log.Printf("Warning: Could not extract exact manifest expression via regex, attempting to run full script content.")
-		if cbIndex := strings.Index(manifestJS, "self.__BUILD_MANIFEST_CB"); cbIndex != -1 {
-			manifestJS = manifestJS[:cbIndex]
-		}
-		manifestJS = strings.TrimRight(manifestJS, "; ")
-		if !strings.Contains(manifestJS, "=") {
-			manifestJS = "(" + manifestJS + ")"
-		} else {
-			parts := strings.SplitN(manifestJS, "=", 2)
-			if len(parts) == 2 {
-				manifestJS = "(" + strings.TrimSpace(parts[1]) + ")"
-			} else {
-				return nil, errors.New("manifest JS structure not recognized for execution (fallback failed)")
-			}
-		}
-	} else {
-		manifestJS = "(" + matches[1] + ")"
-	}
-
-	vm := goja.New()
-	_, err := vm.RunString("var self = {};")
-	if err != nil {
-		return nil, fmt.Errorf("goja: failed to define 'self': %w", err)
-	}
-
-	result, err := vm.RunString(manifestJS)
-	if err != nil {
-		return nil, fmt.Errorf("goja: failed to execute manifest JS: %w", err)
-	}
-
-	exported := result.Export()
-
-	manifestMap, ok := exported.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("goja: manifest JS did not return an object, got type %T", exported)
-	}
-
-	return manifestMap, nil
+func (r *ScanResult) beginObservation(requested string, res *fetch.Response, technique string) {
+	r.observation = &PageObservation{RequestedURL: requested, FinalURL: res.URL, Technique: technique, HTTPStatus: res.StatusCode, Assets: []string{}}
 }
-
-// extractRoutesAndAssets processes the parsed manifest map.
-func extractRoutesAndAssets(manifestData map[string]interface{}, assetBaseURL string) (map[string][]string, map[string]bool) {
-	routes := make(map[string][]string)
-	allAssets := make(map[string]bool)
-
-	baseURLParsed, err := url.Parse(assetBaseURL)
-	if err != nil {
-		log.Printf("Warning: Could not parse asset base URL '%s': %v. Asset URLs might be incorrect.", assetBaseURL, err)
-		baseURLParsed = &url.URL{}
+func (r *ScanResult) endObservation() {
+	if r.observation == nil {
+		return
 	}
-
-	for routePath, assetsInterface := range manifestData {
-		if strings.HasPrefix(routePath, "__") || routePath == "sortedPages" {
-			continue
+	sort.Strings(r.observation.Assets)
+	var scoped []versiondetect.Finding
+	for _, f := range r.Findings {
+		if f.URL == r.observation.FinalURL {
+			scoped = append(scoped, f)
 		}
-
-		assetList, ok := assetsInterface.([]interface{})
-		if !ok {
-			if assetStr, okStr := assetsInterface.(string); okStr && (strings.HasSuffix(assetStr, ".js") || strings.HasSuffix(assetStr, ".css")) {
-				assetList = []interface{}{assetStr}
-			} else {
-				log.Printf("Warning: Skipping route '%s', expected asset list (array) but got %T", routePath, assetsInterface)
-				continue
-			}
-		}
-
-		routeAssets := []string{}
-		for _, assetPathInterface := range assetList {
-			assetPath, ok := assetPathInterface.(string)
-			if !ok {
-				log.Printf("Warning: Skipping non-string asset in route '%s'", routePath)
-				continue
-			}
-
-			if !strings.HasSuffix(assetPath, ".js") && !strings.HasSuffix(assetPath, ".css") {
-				continue
-			}
-
-			assetPath = strings.TrimPrefix(assetPath, "/")
-			
-			fullPath := path.Join(baseURLParsed.Path, "_next", assetPath)
-			
-			resolvedURL := &url.URL{
-				Scheme: baseURLParsed.Scheme,
-				Host:   baseURLParsed.Host,
-				Path:   fullPath,
-			}
-			fullAssetURL := resolvedURL.String()
-
-			routeAssets = append(routeAssets, fullAssetURL)
-			allAssets[fullAssetURL] = true
-		}
-		sort.Strings(routeAssets)
-		routes[routePath] = routeAssets
 	}
-
-	return routes, allAssets
+	build, _ := versiondetect.Resolve(scoped, "build-id")
+	if build != "Unknown" {
+		r.observation.BuildID = build
+	}
+	r.observation.AssetPrefix = r.AssetPrefix
+	r.PageObservations = append(r.PageObservations, *r.observation)
+	r.observation = nil
 }
-
-// ScanTarget performs the Next.js analysis on the given target URL.
-func (s *Scanner) ScanTarget(initialTargetURL string) (*ScanResult, error) {
-	targetURL := initialTargetURL
-	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
-		targetURL = "https://" + targetURL
-	}
-	log.Printf("Scanning target: %s", targetURL)
-
-	htmlBodyReader, finalURL, fetchErr := s.fetcher.Fetch(targetURL)
-	if fetchErr != nil {
-		parsedBaseUrl, _ := url.Parse(targetURL)
-		result := ScanResult{
-			BaseURL:   targetURL,
-			Routes:    make(map[string][]string),
-			AllAssets: make(map[string]bool),
-		}
-		if parsedBaseUrl != nil {
-			result.AssetBaseURL = parsedBaseUrl.String()
-		}
-		result.ExecutionError = fmt.Errorf("scanner: initial fetch failed for %s: %w", targetURL, fetchErr)
-		return &result, result.ExecutionError
-	}
-	defer htmlBodyReader.Close()
-	log.Printf("Initial fetch successful, final URL: %s", finalURL)
-
-	baseURL, parseErr := url.Parse(finalURL)
-	if parseErr != nil {
-		result := ScanResult{
-			BaseURL:   initialTargetURL,
-			Routes:    make(map[string][]string),
-			AllAssets: make(map[string]bool),
-		}
-		err := fmt.Errorf("scanner: invalid final URL '%s' received from fetcher: %w", finalURL, parseErr)
-		result.ExecutionError = err
-		return &result, err
-	}
-
-	result := ScanResult{
-		BaseURL:   baseURL.String(),
-		Routes:    make(map[string][]string),
-		AllAssets: make(map[string]bool),
-	}
-
-	bodyBytes, readErr := io.ReadAll(htmlBodyReader)
-	if readErr != nil {
-		result.ExecutionError = fmt.Errorf("scanner: failed to read response body from %s: %w", finalURL, readErr)
-		return &result, result.ExecutionError
-	}
-	htmlContent := string(bodyBytes)
-
-	var nextData *NextData
-	var nextDataErr error
-	nextData, result.NextDataJSONRaw, nextDataErr = findAndParseNextData(strings.NewReader(htmlContent))
-
-	if nextDataErr != nil {
-		log.Printf("Note: Error processing __NEXT_DATA__: %v", nextDataErr)
-		if nextData != nil && nextData.BuildID != "" {
-			result.IsNextJS = true
-			result.BuildID = nextData.BuildID
-			result.AssetPrefix = nextData.AssetPrefix
-		} else if !errors.Is(nextDataErr, errors.New("__NEXT_DATA__ script tag not found")) {
-			result.IsNextJS = false
-		}
-	} else {
-		result.IsNextJS = true
-		result.BuildID = nextData.BuildID
-		result.AssetPrefix = nextData.AssetPrefix
-	}
-
-	// Handle asset base URL based on whether a custom base URL was provided
-	var assetBaseParsedURL url.URL
-	
-	if s.customBaseURL != "" {
-		// Use the custom base URL when provided
-		customURL, err := url.Parse(s.customBaseURL)
-		if err != nil {
-			log.Printf("Warning: Could not parse custom base URL '%s': %v. Using default behavior.", s.customBaseURL, err)
-			assetBaseParsedURL = *baseURL
-		} else {
-			log.Printf("Using custom base URL: %s", s.customBaseURL)
-			assetBaseParsedURL = *customURL
-			
-			// If asset prefix is detected, append it to the custom base URL
-			if result.AssetPrefix != "" {
-				prefixURL, err := url.Parse(result.AssetPrefix)
-				if err == nil && prefixURL.IsAbs() {
-					// If asset prefix is absolute, use just its path with the custom base URL
-					prefixPath := prefixURL.Path
-					if !strings.HasSuffix(assetBaseParsedURL.Path, "/") && !strings.HasPrefix(prefixPath, "/") {
-						assetBaseParsedURL.Path += "/"
-					}
-					assetBaseParsedURL.Path += strings.TrimPrefix(prefixPath, "/")
-					log.Printf("Appending absolute AssetPrefix path to custom base URL: %s", assetBaseParsedURL.String())
-				} else {
-					// For relative asset prefix, simply append it to the custom base path
-					if !strings.HasSuffix(assetBaseParsedURL.Path, "/") && !strings.HasPrefix(result.AssetPrefix, "/") {
-						assetBaseParsedURL.Path += "/"
-					}
-					assetBaseParsedURL.Path += strings.TrimPrefix(result.AssetPrefix, "/")
-					log.Printf("Appending relative AssetPrefix to custom base URL: %s", assetBaseParsedURL.String())
-				}
-			}
-		}
-	} else {
-		// Use the original logic when no custom base URL is provided
-		assetBaseParsedURL = *baseURL
-		if result.AssetPrefix != "" {
-			prefixURL, err := url.Parse(result.AssetPrefix)
-			if err == nil && prefixURL.IsAbs() {
-				assetBaseParsedURL = *prefixURL
-				log.Printf("Using absolute AssetPrefix: %s", assetBaseParsedURL.String())
-			} else {
-				assetPrefixURL := &url.URL{Path: result.AssetPrefix}
-				resolvedAssetBaseURL := baseURL.ResolveReference(assetPrefixURL)
-				assetBaseParsedURL = *resolvedAssetBaseURL
-				if assetBaseParsedURL.Path != "" && !strings.HasSuffix(assetBaseParsedURL.Path, "/") {
-					assetBaseParsedURL.Path += "/"
-				}
-				log.Printf("Using relative AssetPrefix, resolved asset base: %s", assetBaseParsedURL.String())
-			}
-		} else {
-			log.Printf("No AssetPrefix found, asset paths will be resolved relative to page base: %s", assetBaseParsedURL.String())
-		}
-	}
-	
-	result.AssetBaseURL = assetBaseParsedURL.String()
-
-	initialScriptURLs := findInitialScriptURLs(htmlContent, &assetBaseParsedURL)
-
-	if errors.Is(nextDataErr, errors.New("__NEXT_DATA__ script tag not found")) && len(initialScriptURLs) > 0 {
-		log.Println("__NEXT_DATA__ not found, but initial Next.js scripts detected. Setting IsNextJS=true.")
-		result.IsNextJS = true
-	}
-
-	manifestAssets := make(map[string]bool)
-	routes := make(map[string][]string)
-	var manifestProcessingError error
-
-	if result.BuildID != "" {
-		// Construct the manifest URL correctly
-		// When using custom base URL + asset prefix, we need to be careful with path construction
-		// We need to determine whether _next should be a part of the asset prefix or appended separately
-		
-		var manifestURL string
-		
-		// Check if the asset base already contains _next in the path (from the asset prefix)
-		if strings.Contains(assetBaseParsedURL.Path, "/_next/") || strings.HasSuffix(assetBaseParsedURL.Path, "/_next") {
-			// Asset base already contains _next path, just append the rest
-			relativePath := path.Join("static", result.BuildID, "_buildManifest.js")
-			manifestPathURL := &url.URL{Path: relativePath}
-			manifestURL = (&assetBaseParsedURL).ResolveReference(manifestPathURL).String()
-		} else {
-			// Asset base doesn't contain _next, so append the full path
-			relativePath := path.Join("_next/static", result.BuildID, "_buildManifest.js")
-			manifestPathURL := &url.URL{Path: relativePath}
-			manifestURL = (&assetBaseParsedURL).ResolveReference(manifestPathURL).String()
-		}
-		
-		log.Printf("Attempting to fetch build manifest from: %s", manifestURL)
-
-		var manifestReader io.ReadCloser
-		var manifestFinalURL string
-		
-		manifestReader, manifestFinalURL, fetchErr := s.fetcher.Fetch(manifestURL)
-		if fetchErr != nil {
-			log.Printf("Failed to fetch build manifest: %v", fetchErr)
-			
-			// Try a fallback approach for sites that might place the manifest at the root
-			// This is especially relevant for complex CDN setups with custom base URLs
-			var fallbackManifestURL string
-			
-			// Construct a fallback URL that assumes the manifest might be at the root of the asset prefix path
-			customRoot, err := url.Parse(s.customBaseURL)
-			if s.customBaseURL != "" && err == nil && result.AssetPrefix != "" {
-				// Try a direct join of the host with _next path
-				fallbackPath := path.Join("_next/static", result.BuildID, "_buildManifest.js")
-				
-				// Parse the asset prefix to extract host and path components
-				prefixURL, prefixErr := url.Parse(result.AssetPrefix)
-				
-				if prefixErr == nil && prefixURL.Host != "" {
-					// Handle case where AssetPrefix is a full URL
-					host := prefixURL.Host
-					pathPrefix := prefixURL.Path
-					
-					scheme := customRoot.Scheme
-					if scheme == "" {
-						scheme = "https" // Default to https
-					}
-					
-					// Include the path component from the asset prefix
-					completePath := path.Join(pathPrefix, fallbackPath)
-					fallbackManifestURL = fmt.Sprintf("%s://%s%s", scheme, host, completePath)
-				} else if strings.Contains(result.AssetPrefix, ".") {
-					// Handle cases where the asset prefix might contain a domain
-					// Extract domain and path components from the asset prefix
-					assetPrefix := strings.Trim(result.AssetPrefix, "/")
-					assetPrefixParts := strings.Split(assetPrefix, "/")
-					
-					// Check if the first part looks like a domain
-					if len(assetPrefixParts) > 0 && strings.Contains(assetPrefixParts[0], ".") {
-						host := assetPrefixParts[0]
-						remainingPath := ""
-						
-						// Reconstruct the path after the domain
-						if len(assetPrefixParts) > 1 {
-							remainingPath = "/" + strings.Join(assetPrefixParts[1:], "/")
-						}
-						
-						scheme := customRoot.Scheme
-						if scheme == "" {
-							scheme = "https" // Default to https
-						}
-						
-						// Construct URL with domain and preserved path components
-						completePath := path.Join(remainingPath, fallbackPath)
-						fallbackManifestURL = fmt.Sprintf("%s://%s%s", scheme, host, completePath)
-						log.Printf("Detected domain in AssetPrefix, using: %s://%s%s", scheme, host, remainingPath)
-					} else {
-						// If no domain detected, use the original error
-						manifestProcessingError = fmt.Errorf("failed to fetch build manifest at %s: %w", manifestURL, fetchErr)
-					}
-				} else {
-					manifestProcessingError = fmt.Errorf("failed to fetch build manifest at %s: %w", manifestURL, fetchErr)
-				}
-				
-				// If we constructed a fallback URL, try to fetch it
-				if fallbackManifestURL != "" {
-					log.Printf("Trying fallback manifest location: %s", fallbackManifestURL)
-					
-					fallbackReader, fallbackFinalURL, fallbackErr := s.fetcher.Fetch(fallbackManifestURL)
-					if fallbackErr == nil {
-						// Successfully fetched the fallback URL
-						manifestReader = fallbackReader
-						manifestFinalURL = fallbackFinalURL
-						fetchErr = nil // Clear the error since fallback worked
-						log.Printf("Successfully fetched manifest from fallback location: %s", fallbackFinalURL)
-					} else {
-						log.Printf("Fallback manifest fetch also failed: %v", fallbackErr)
-						// Keep the original error and continue with it
-						manifestProcessingError = fmt.Errorf("failed to fetch build manifest at %s (and fallback): %w", manifestURL, fetchErr)
-					}
-				}
-			} else {
-				manifestProcessingError = fmt.Errorf("failed to fetch build manifest at %s: %w", manifestURL, fetchErr)
-			}
-		}
-		
-		// If we have a valid manifest reader (either from primary or fallback URL), process it
-		if manifestReader != nil {
-			defer manifestReader.Close()
-			if manifestFinalURL != manifestURL {
-				log.Printf("Build manifest request resulted in final URL: %s", manifestFinalURL)
-			}
-			result.ManifestFound = true
-
-			manifestBytes, readErr := io.ReadAll(manifestReader)
-			if readErr != nil {
-				log.Printf("Failed to read build manifest: %v", readErr)
-				manifestProcessingError = fmt.Errorf("failed to read build manifest from %s: %w", manifestFinalURL, readErr)
-			} else {
-				manifestJS := string(manifestBytes)
-				execData, execErr := executeManifestJS(manifestJS)
-				if execErr != nil {
-					log.Printf("Failed to execute build manifest JS: %v", execErr)
-					trimmedJS := strings.ReplaceAll(manifestJS, "\n", " ")
-					if len(trimmedJS) > 200 { trimmedJS = trimmedJS[:200] + "..." }
-					log.Printf("Problematic Manifest JS (preview): %s", trimmedJS)
-					manifestProcessingError = fmt.Errorf("goja execution failed: %w", execErr)
-				} else {
-					result.ManifestExecOK = true
-					routes, manifestAssets = extractRoutesAndAssets(execData, result.AssetBaseURL)
-					result.Routes = routes
-					result.AllAssets = manifestAssets
-					log.Printf("Successfully processed build manifest. Found %d routes and %d assets.", len(routes), len(manifestAssets))
-				}
-			}
-		}
-	} else {
-		log.Println("No BuildID found, skipping build manifest fetch.")
-		if result.AllAssets == nil { result.AllAssets = make(map[string]bool) }
-		for url := range initialScriptURLs {
-			result.AllAssets[url] = true
-		}
-		log.Printf("No BuildID found. Using %d initial scripts for AllAssets.", len(initialScriptURLs))
-	}
-
-	combinedJSAssets := make(map[string]bool)
-	for url := range initialScriptURLs {
-		combinedJSAssets[url] = true
-	}
-	if result.ManifestFound && result.ManifestExecOK {
-		for url := range manifestAssets {
-			if strings.HasSuffix(url, ".js") {
-				combinedJSAssets[url] = true
-			}
-		}
-	}
-	log.Printf("Using %d unique JS assets for version detection.", len(combinedJSAssets))
-
-	nextV, reactV := s.versionDetector.Detect(result.BuildID, combinedJSAssets, &assetBaseParsedURL, s.fetcher)
-	result.DetectedNextVersion = nextV
-	result.DetectedReactVersion = reactV
-
-	var finalError error
-	if manifestProcessingError != nil {
-		finalError = fmt.Errorf("scanner: manifest processing failed: %w", manifestProcessingError)
-		log.Printf("Scan completed with manifest processing errors.")
-	} else if nextDataErr != nil && !errors.Is(nextDataErr, errors.New("__NEXT_DATA__ script tag not found")) {
-		finalError = fmt.Errorf("scanner: __NEXT_DATA__ processing error: %w", nextDataErr)
-		log.Printf("Scan completed with __NEXT_DATA__ processing errors.")
-	} else if errors.Is(nextDataErr, errors.New("__NEXT_DATA__ script tag not found")) && len(initialScriptURLs) == 0 {
-		finalError = nextDataErr
-		log.Printf("Scan complete: __NEXT_DATA__ not found and no initial scripts detected.")
-	} else if errors.Is(nextDataErr, errors.New("__NEXT_DATA__ script tag not found")) && result.IsNextJS {
-		log.Printf("Scan complete: __NEXT_DATA__ not found but initial scripts were present.")
-	} else {
-		log.Printf("Scan complete. Routes: %d, Assets (final combined): %d", len(result.Routes), len(combinedJSAssets))
-	}
-
-	if !result.IsNextJS {
-		versionFound := result.DetectedNextVersion
-		if versionFound != "" && !strings.HasPrefix(versionFound, "Unknown") && !strings.Contains(versionFound, "Likely") {
-			log.Printf("Setting IsNextJS=true based on detected version '%s' despite missing __NEXT_DATA__.", versionFound)
-			result.IsNextJS = true
-			if finalError != nil && errors.Is(finalError, errors.New("__NEXT_DATA__ script tag not found")) {
-				finalError = nil
-			} else if finalError != nil && strings.Contains(finalError.Error(), "Unsupported deployment") {
-				finalError = nil
-			}
-		}
-	}
-
-	result.ExecutionError = finalError
-
-	return &result, finalError
-}
-
-// PrintResults formats and prints the scan results.
-func PrintResults(result *ScanResult, outputFormat string) error {
-	switch outputFormat {
-	case "json":
-		outJSON, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal result to JSON: %w", err)
-		}
-		fmt.Println(string(outJSON))
-	case "text":
-		// Define colors (will automatically handle non-TTY environments)
-		title := color.New(color.FgWhite, color.Bold).SprintfFunc()
-		label := color.New(color.FgYellow).SprintFunc()
-		value := color.New(color.FgCyan).SprintFunc()
-		valBoolTrue := color.New(color.FgGreen).SprintFunc()
-		valBoolFalse := color.New(color.FgRed).SprintFunc()
-		errorText := color.New(color.FgRed).SprintFunc()
-		routePath := color.New(color.FgMagenta).SprintFunc()
-		assetCount := color.New(color.FgBlue).SprintfFunc()
-
-		fmt.Printf("%s: %s\n", title("Scan Results for"), value(result.BaseURL))
-		fmt.Printf("%s %s\n", label("Is Next.js:"), formatBool(result.IsNextJS, valBoolTrue, valBoolFalse))
-
-		if result.IsNextJS {
-			fmt.Printf("%s %s\n", label("Build ID:"), value(result.BuildID))
-			fmt.Printf("%s %s\n", label("Detected Next.js Version:"), value(result.DetectedNextVersion))
-			fmt.Printf("%s %s\n", label("Detected React Version:"), value(result.DetectedReactVersion))
-			fmt.Printf("%s %s\n", label("Asset Prefix:"), value(result.AssetPrefix))
-			fmt.Printf("%s %s\n", label("Calculated Asset Base URL:"), value(result.AssetBaseURL))
-			fmt.Printf("%s %s\n", label("Build Manifest Found:"), formatBool(result.ManifestFound, valBoolTrue, valBoolFalse))
-			fmt.Printf("%s %s\n", label("Build Manifest Executed OK:"), formatBool(result.ManifestExecOK, valBoolTrue, valBoolFalse))
-
-			if result.ExecutionError != nil {
-				fmt.Printf("%s %s\n", label("Execution Error:"), errorText("\n"+result.ExecutionError.Error()))
-			} else {
-				fmt.Printf("%s (%s routes found):\n", label("Routes"), value(len(result.Routes)))
-				routeKeys := make([]string, 0, len(result.Routes))
-				for route := range result.Routes {
-					routeKeys = append(routeKeys, route)
-				}
-				sort.Strings(routeKeys)
-
-				for _, route := range routeKeys {
-					assetNumStr := assetCount("(%d assets)", len(result.Routes[route]))
-					fmt.Printf("  - %s %s\n", routePath(route), assetNumStr)
-				}
-				fmt.Printf("%s %s unique assets from manifest.\n", label("Found"), value(len(result.AllAssets)))
-			}
-		}
-		if result.NextDataJSONRaw != "" && !result.IsNextJS {
-			fmt.Printf("\n%s\n%s\n", label("Raw __NEXT_DATA__ (found but potentially invalid):"), result.NextDataJSONRaw)
-		}
-	default:
-		return fmt.Errorf("unknown output format: %s", outputFormat)
-	}
-	return nil
-}
-
-// formatBool helper for colorizing boolean output
-func formatBool(b bool, trueColorFunc, falseColorFunc func(a ...interface{}) string) string {
-	if b {
-		return trueColorFunc("true")
-	}
-	return falseColorFunc("false")
-}
-
-// WriteOutput formats and writes the scan results to a file.
-// It defaults to JSON but can write text if specified.
-func WriteOutput(result *ScanResult, outputFile string, outputFormat string) error {
-	var outputBytes []byte
-	var err error
-
-	if outputFormat == "json" {
-		outputBytes, err = json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal result to JSON for file output: %w", err)
-		}
-	} else if outputFormat == "text" {
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Scan Results for: %s\n", result.BaseURL))
-		sb.WriteString(fmt.Sprintf("Is Next.js: %t\n", result.IsNextJS))
-		if result.IsNextJS {
-			sb.WriteString(fmt.Sprintf("Build ID: %s\n", result.BuildID))
-			sb.WriteString(fmt.Sprintf("Detected Next.js Version: %s\n", result.DetectedNextVersion))
-			sb.WriteString(fmt.Sprintf("Detected React Version: %s\n", result.DetectedReactVersion))  
-			sb.WriteString(fmt.Sprintf("Asset Prefix: %s\n", result.AssetPrefix))
-			sb.WriteString(fmt.Sprintf("Calculated Asset Base URL: %s\n", result.AssetBaseURL))
-			sb.WriteString(fmt.Sprintf("Build Manifest Found: %t\n", result.ManifestFound))
-			sb.WriteString(fmt.Sprintf("Build Manifest Executed OK: %t\n", result.ManifestExecOK))
-			if result.ExecutionError != nil {
-				sb.WriteString(fmt.Sprintf("Execution Error: %v\n", result.ExecutionError))
-			} else {
-				sb.WriteString(fmt.Sprintf("Found %d Routes:\n", len(result.Routes)))
-				routeKeys := make([]string, 0, len(result.Routes))
-				for route := range result.Routes {
-					routeKeys = append(routeKeys, route)
-				}
-				sort.Strings(routeKeys)
-
-				for _, route := range routeKeys {
-					sb.WriteString(fmt.Sprintf("  - %s (%d assets)\n", route, len(result.Routes[route])))
-				}
-				sb.WriteString(fmt.Sprintf("Found %d Unique Assets from manifest.\n", len(result.AllAssets)))
-			}
-		}
-		if result.NextDataJSONRaw != "" && !result.IsNextJS {
-			sb.WriteString(fmt.Sprintf("\nRaw __NEXT_DATA__ (found but potentially invalid):\n%s\n", result.NextDataJSONRaw))
-		}
-		outputBytes = []byte(sb.String())
-	} else {
-		return fmt.Errorf("unknown output format for file writing: %s", outputFormat)
-	}
-
-	err = os.WriteFile(outputFile, outputBytes, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write output file '%s': %w", outputFile, err)
-	}
-	log.Printf("Results written to %s", outputFile)
-	return nil
-} 

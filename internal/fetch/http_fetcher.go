@@ -1,12 +1,18 @@
 package fetch
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Danny-Dasilva/CycleTLS/cycletls"
+	"golang.org/x/net/publicsuffix"
 )
 
 // tlsProfile holds a JA3 fingerprint and User-Agent combination.
@@ -29,124 +35,135 @@ var defaultProfiles = []tlsProfile{
 	},
 }
 
-// HTTPFetcher implements the Fetcher interface using cycleTLS.
+// HTTPFetcher keeps a browser-style session for the lifetime of a scan.
 type HTTPFetcher struct {
-	client   cycletls.CycleTLS
-	profiles []tlsProfile
-	// insecureSkipVerify disables TLS certificate verification for every request
-	// made by this fetcher. It only affects certificate validation; JA3
-	// fingerprints, headers and redirect handling are unchanged.
+	client             cycletls.CycleTLS
+	profiles           []tlsProfile
+	jar                http.CookieJar
 	insecureSkipVerify bool
 }
 
-// NewHTTPFetcher creates a new HTTPFetcher with default cycleTLS settings and profiles.
-// TLS certificate verification is enabled.
-func NewHTTPFetcher() *HTTPFetcher {
-	return NewHTTPFetcherWithOptions(false)
+func NewHTTPFetcher() *HTTPFetcher { return NewHTTPFetcherWithOptions(false) }
+func NewHTTPFetcherWithOptions(insecure bool) *HTTPFetcher {
+	jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	return &HTTPFetcher{client: cycletls.Init(), profiles: defaultProfiles, jar: jar, insecureSkipVerify: insecure}
+}
+func (f *HTTPFetcher) Fetch(target string) (io.ReadCloser, string, error) {
+	res, err := f.FetchResponse(Request{URL: target})
+	final := target
+	if res != nil {
+		final = res.URL
+	}
+	if err != nil {
+		return nil, final, err
+	}
+	if res.StatusCode != http.StatusOK {
+		return nil, final, fmt.Errorf("http_fetcher: bad status code fetching %s: %d", final, res.StatusCode)
+	}
+	return io.NopCloser(strings.NewReader(string(res.Body))), final, nil
 }
 
-// NewHTTPFetcherWithOptions creates a new HTTPFetcher with default cycleTLS
-// settings and profiles. When insecureSkipVerify is true the fetcher accepts
-// any TLS certificate presented by the server, including self-signed and
-// expired ones. This should only be used against trusted targets.
-func NewHTTPFetcherWithOptions(insecureSkipVerify bool) *HTTPFetcher {
-	client := cycletls.Init()
-	return &HTTPFetcher{
-		client:             client,
-		profiles:           defaultProfiles,
-		insecureSkipVerify: insecureSkipVerify,
+func (f *HTTPFetcher) FetchResponse(req Request) (*Response, error) {
+	current, err := url.Parse(req.URL)
+	if err != nil || current.Host == "" || (current.Scheme != "https" && current.Scheme != "http") {
+		return nil, fmt.Errorf("invalid HTTP URL: %s", req.URL)
 	}
+	headers := req.Headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	// CycleTLS does not add Accept automatically. Some sites reject otherwise
+	// valid requests without it; preserve explicit content negotiation (e.g. RSC).
+	if headers.Get("Accept") == "" {
+		headers.Set("Accept", "*/*")
+	}
+	var history []Redirect
+	seen := make(map[string]bool)
+	var result *Response
+	for hop := 0; hop <= 10; hop++ {
+		// URL alone is not a loop: an auth redirect may have changed the session.
+		cookieHeader := &http.Request{Header: make(http.Header)}
+		for _, c := range f.jar.Cookies(current) {
+			cookieHeader.AddCookie(c)
+		}
+		state := fmt.Sprintf("%s:%x", current.String(), sha256.Sum256([]byte(cookieHeader.Header.Get("Cookie"))))
+		if seen[state] {
+			return result, fmt.Errorf("redirect loop at %s", current.Redacted())
+		}
+		seen[state] = true
+		var raw cycletls.Response
+		var requestErr error
+		for index, profile := range f.profiles {
+			h := make(map[string]string)
+			for k, v := range headers {
+				h[k] = strings.Join(v, ", ")
+			}
+			if cookie := cookieHeader.Header.Get("Cookie"); cookie != "" {
+				h["Cookie"] = cookie
+			}
+			log.Printf("HTTP: GET %s (TLS profile %d/%d)", current.Redacted(), index+1, len(f.profiles))
+			started := time.Now()
+			raw, requestErr = f.client.Do(current.String(), cycletls.Options{
+				Ja3: profile.ja3, UserAgent: profile.userAgent, Headers: h,
+				DisableRedirect: true, Timeout: 20, InsecureSkipVerify: f.insecureSkipVerify,
+			}, "GET")
+			if requestErr != nil {
+				log.Printf("HTTP: profile %d failed after %s: %v", index+1, time.Since(started).Round(time.Millisecond), requestErr)
+			} else {
+				log.Printf("HTTP: status %d in %s", raw.Status, time.Since(started).Round(time.Millisecond))
+			}
+			if requestErr == nil && raw.Status != 0 && raw.Status != http.StatusForbidden {
+				break
+			}
+			if index+1 < len(f.profiles) {
+				log.Println("HTTP: retrying with next TLS profile")
+			}
+		}
+		if requestErr != nil {
+			return result, fmt.Errorf("fetch %s: %w", current.Redacted(), requestErr)
+		}
+		if raw.Status == 0 {
+			return result, fmt.Errorf("transport failure fetching %s: %s", current.Redacted(), raw.Body)
+		}
+		rh := make(http.Header)
+		for k, v := range raw.Headers {
+			for _, value := range strings.Split(v, "/,/") {
+				rh.Add(k, value)
+			}
+		}
+		f.jar.SetCookies(current, raw.Cookies)
+		// Cookies remain in the jar, not in serializable scan evidence.
+		rh.Del("Set-Cookie")
+		result = &Response{URL: current.String(), StatusCode: raw.Status, Headers: rh,
+			Redirects: append([]Redirect(nil), history...), TLSVerificationDisabled: f.insecureSkipVerify}
+		// CycleTLS buffers responses internally; this bounds downstream parsing.
+		if len(raw.Body) > MaxBodyBytes {
+			return result, fmt.Errorf("response exceeds %d bytes", MaxBodyBytes)
+		}
+		result.Body = []byte(raw.Body)
+		switch raw.Status {
+		case 301, 302, 303, 307, 308:
+		default:
+			return result, nil
+		}
+		location := rh.Get("Location")
+		if location == "" {
+			return result, nil
+		}
+		next, e := current.Parse(location)
+		if e != nil || next.Host == "" || (next.Scheme != "http" && next.Scheme != "https") {
+			return result, fmt.Errorf("invalid redirect from %s", current.Redacted())
+		}
+		log.Printf("HTTP: redirect %d -> %s", raw.Status, next.Redacted())
+		history = append(history, Redirect{URL: current.String(), StatusCode: raw.Status, Location: next.String()})
+		result.Redirects = append([]Redirect(nil), history...)
+		if next.Host != current.Host || next.Scheme != current.Scheme {
+			headers.Del("Authorization")
+			headers.Del("Cookie")
+			headers.Del("Proxy-Authorization")
+		}
+		current = next
+	}
+	return result, fmt.Errorf("stopped after 10 redirects")
 }
-
-// Fetch retrieves the content from the targetURL using cycleTLS.
-// It iterates through a list of predefined JA3/User-Agent profiles,
-// attempting the request with each until one succeeds or the list is exhausted.
-// It returns the content as an io.ReadCloser, the final URL reached
-// after any redirects, and an error if fetching failed.
-// The caller is responsible for closing the returned io.ReadCloser.
-func (f *HTTPFetcher) Fetch(targetURL string) (io.ReadCloser, string, error) {
-	var lastResp cycletls.Response
-	var lastErr error
-	var success bool
-	var finalURL string
-
-	for i, profile := range f.profiles {
-		options := cycletls.Options{
-			Body:               "",
-			Ja3:                profile.ja3,
-			UserAgent:          profile.userAgent,
-			Headers:            map[string]string{},
-			InsecureSkipVerify: f.insecureSkipVerify,
-		}
-
-		resp, err := f.client.Do(targetURL, options, "GET")
-
-		lastResp = resp
-		lastErr = err
-
-		if err != nil {
-			fmt.Printf("http_fetcher: Profile #%d failed for %s: Error during Do(): %v\n", i+1, targetURL, err)
-			continue
-		}
-
-		if resp.Status == 0 && (strings.Contains(resp.Body, "tls: protocol version not supported") || strings.Contains(resp.Body, "HANDSHAKE_FAILURE")) {
-			fmt.Printf("http_fetcher: Profile #%d failed for %s: TLS handshake error. Body: %s\n", i+1, targetURL, resp.Body)
-			continue
-		}
-
-		if resp.Status == http.StatusForbidden {
-			fmt.Printf("http_fetcher: Profile #%d received 403 Forbidden for %s. Trying next profile.\n", i+1, targetURL)
-			continue
-		}
-
-		success = true
-		break
-	}
-
-	if !success {
-		errMsg := fmt.Sprintf("http_fetcher: all TLS profiles failed for %s", targetURL)
-		if lastErr != nil {
-			errMsg = fmt.Sprintf("%s. Last Do() error: %v", errMsg, lastErr)
-		} else if lastResp.Status == 0 && lastResp.Body != "" {
-			errMsg = fmt.Sprintf("%s. Last response body: %s", errMsg, lastResp.Body)
-		} else if lastResp.Status == http.StatusForbidden {
-			errMsg = fmt.Sprintf("%s. Last attempt resulted in 403 Forbidden.", errMsg)
-		}
-		finalURL = lastResp.FinalUrl
-		if finalURL == "" {
-			finalURL = targetURL
-		}
-		return nil, finalURL, fmt.Errorf("%s", errMsg)
-	}
-
-	finalURL = lastResp.FinalUrl
-	if finalURL == "" {
-		finalURL = targetURL
-	}
-
-	if lastResp.Status == 0 {
-		errMsg := fmt.Sprintf("http_fetcher: cycleTLS returned status 0 (non-TLS handshake error) for %s", finalURL)
-		if lastResp.Body != "" {
-			errMsg = fmt.Sprintf("%s, body: %s", errMsg, lastResp.Body)
-		}
-		return nil, finalURL, fmt.Errorf("%s", errMsg)
-	}
-
-	if lastResp.Status != http.StatusOK {
-		return nil, finalURL, fmt.Errorf("http_fetcher: bad status code fetching %s (final URL: %s): %d", targetURL, finalURL, lastResp.Status)
-	}
-
-	bodyReader := strings.NewReader(lastResp.Body)
-	bodyCloser := io.NopCloser(bodyReader)
-
-	return bodyCloser, finalURL, nil
-}
-
-// Capabilities implements the Fetcher interface.
-// cycleTLS mimics browser TLS but doesn't execute JS or parse DOM.
-func (f *HTTPFetcher) Capabilities() FetcherCapabilities {
-	return FetcherCapabilities{
-		CanExecuteJavaScript: false,
-		CanQueryDOM:          false,
-	}
-} 
+func (f *HTTPFetcher) Capabilities() FetcherCapabilities { return FetcherCapabilities{} }

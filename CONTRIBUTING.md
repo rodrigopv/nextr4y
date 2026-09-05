@@ -46,7 +46,7 @@ We welcome feature requests and enhancements! Please file an issue using the fea
 
 ### Prerequisites
 
-- Go 1.24
+- Go 1.25.5 or newer
 - Git
 
 ### Local Development

@@ -1,0 +1,10 @@
+{
+  "next": "14.2.5",
+  "react": "18.3.0-canary-14898b6a9-20240318",
+  "bundler": "webpack",
+  "chunks": {
+    "a-polyfills.js": "var shared=\"__core-js_shared__\";shared.versions.push({version:\"3.38.1\",mode:\"global\"});",
+    "b-react.js": "n.useTransition=function(){return S.H.useTransition()},n.version=\"18.3.0-canary-14898b6a9-20240318\";",
+    "c-runtime.js": "window.next={version:\"14.2.5\",appDir:!0};self.webpackChunk_N_E=[];if(\"18.3.0-canary-14898b6a9-20240318\"!==o.version)throw Error(527);;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;hook.inject({bundleType:0,version:\"18.3.0-canary-14898b6a9-20240318\",rendererPackageName:\"react-dom\",currentDispatcherRef:W,reconcilerVersion:\"18.3.0-canary-14898b6a9-20240318\"});"
+  }
+}

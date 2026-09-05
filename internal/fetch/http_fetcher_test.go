@@ -114,4 +114,4 @@ func TestHTTPFetcher_Fetch(t *testing.T) {
 
 // Optional: Test error during request creation (if possible, e.g. invalid method)
 // This is less about the Fetch method logic and more about http.NewRequest.
-// func TestHTTPFetcher_Fetch_BadRequest(t *testing.T) { ... } 
+// func TestHTTPFetcher_Fetch_BadRequest(t *testing.T) { ... }

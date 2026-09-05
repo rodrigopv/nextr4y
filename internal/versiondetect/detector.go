@@ -14,4 +14,4 @@ type VersionDetector interface {
 	// It returns the detected Next.js version and React version strings.
 	// "Unknown" or a fallback value (like ">=13...") should be returned if detection fails.
 	Detect(buildID string, jsAssetURLs map[string]bool, assetBaseURL *url.URL, fetcher fetch.Fetcher) (nextVersion string, reactVersion string)
-} 
+}

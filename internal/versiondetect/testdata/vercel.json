@@ -1,0 +1,10 @@
+{
+  "next": "16.4.0-canary.12",
+  "react": "19.3.0-canary-29d9d318-20260826",
+  "bundler": "turbopack",
+  "chunks": {
+    "a-polyfills.js": "var shared=\"__core-js_shared__\";shared.versions.push({version:\"3.38.1\",mode:\"global\"});",
+    "b-react.js": "n.useTransition=function(){return S.H.useTransition()},n.version=\"19.3.0-canary-29d9d318-20260826\";",
+    "c-runtime.js": "window.next={version:\"16.4.0-canary.12\",appDir:!0};window.next.turbopack=!0;if(\"19.3.0-canary-29d9d318-20260826\"!==o.version)throw Error(527);;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;hook.inject({bundleType:0,version:\"19.3.0-canary-29d9d318-20260826\",rendererPackageName:\"react-dom\",currentDispatcherRef:W,reconcilerVersion:\"19.3.0-canary-29d9d318-20260826\"});"
+  }
+}

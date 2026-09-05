@@ -6,13 +6,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/fatih/color"                       // Import color package
+	"github.com/fatih/color" // Import color package
 	"github.com/rodrigopv/nextr4y/internal/fetch"
 	"github.com/rodrigopv/nextr4y/internal/mcpserver"
 	"github.com/rodrigopv/nextr4y/internal/scanner"
 	"github.com/rodrigopv/nextr4y/internal/versiondetect"
 	"github.com/urfave/cli/v2"
-	// TODO: Import github.com/mark3labs/mcp-go when it's available for implementation
 )
 
 // Build information, initialized to defaults and potentially overridden by ldflags.
@@ -27,7 +26,7 @@ func printBanner() {
 	nameColor := color.New(color.FgWhite, color.Bold)
 	urlColor := color.New(color.FgCyan)
 	metaColor := color.New(color.FgWhite) // Color for version/commit/date
-	width := 64 // Width of the content area inside the box
+	width := 64                           // Width of the content area inside the box
 	border := "+" + strings.Repeat("-", width) + "+"
 	nameText := "nextr4y"
 	urlText := "github.com/rodrigopv/nextr4y" // Corrected repo name
@@ -44,17 +43,17 @@ func printBanner() {
 	urlPaddingRight := strings.Repeat(" ", width-len(urlText)-(urlPaddingTotal/2)) // Calculate remainder
 
 	lineColor.Println(border)
-	lineColor.Print("|")      // Print starting pipe (colored)
-	fmt.Print(namePaddingLeft) // Print left padding (no color)
-	nameColor.Print(nameText)  // Print colored name
-	fmt.Print(namePaddingRight)// Print right padding (no color)
-	lineColor.Println("|")     // Print ending pipe and newline (colored)
+	lineColor.Print("|")        // Print starting pipe (colored)
+	fmt.Print(namePaddingLeft)  // Print left padding (no color)
+	nameColor.Print(nameText)   // Print colored name
+	fmt.Print(namePaddingRight) // Print right padding (no color)
+	lineColor.Println("|")      // Print ending pipe and newline (colored)
 
-	lineColor.Print("|")     // Print starting pipe (colored)
-	fmt.Print(urlPaddingLeft) // Print left padding (no color)
-	urlColor.Print(urlText)   // Print colored url
-	fmt.Print(urlPaddingRight)// Print right padding (no color)
-	lineColor.Println("|")    // Print ending pipe and newline (colored)
+	lineColor.Print("|")       // Print starting pipe (colored)
+	fmt.Print(urlPaddingLeft)  // Print left padding (no color)
+	urlColor.Print(urlText)    // Print colored url
+	fmt.Print(urlPaddingRight) // Print right padding (no color)
+	lineColor.Println("|")     // Print ending pipe and newline (colored)
 
 	lineColor.Println(border)
 
@@ -68,6 +67,9 @@ func scanAction(c *cli.Context) error {
 	if c.NArg() != 1 {
 		cli.ShowCommandHelpAndExit(c, c.Command.Name, 1) // Show help if URL is missing
 	}
+	if c.Int("crawl-pages") < 0 || c.Int("crawl-pages") > 32 {
+		return cli.Exit("--crawl-pages must be between 0 and 32", 1)
+	}
 	targetURL := c.Args().Get(0)
 	outputFile := c.String("output")
 	outputFormat := c.String("format")
@@ -78,6 +80,9 @@ func scanAction(c *cli.Context) error {
 		return cli.Exit(fmt.Sprintf("Error: Invalid output format '%s'. Use 'text' or 'json'.", outputFormat), 1)
 	}
 
+	if outputFormat == "text" {
+		printBanner()
+	}
 	log.Printf("Scanning target: %s", targetURL)
 	if customBaseURL != "" {
 		log.Printf("Using custom base URL: %s", customBaseURL)
@@ -90,7 +95,8 @@ func scanAction(c *cli.Context) error {
 	// Create the fetcher and scanner instances
 	fetcher := fetch.NewHTTPFetcherWithOptions(insecure)
 	versionDetector := &versiondetect.HeuristicAssetScannerDetector{}
-	scr := scanner.NewScanner(fetcher, versionDetector, customBaseURL) // Pass the custom base URL
+	scr := scanner.NewScanner(fetcher, versionDetector, customBaseURL)
+	scr.Options = scanner.Options{ProbeRSC: c.Bool("rsc"), DiscoverRoutes: c.Bool("sitemap"), CrawlPages: c.Int("crawl-pages")}
 
 	// Call the ScanTarget method
 	result, err := scr.ScanTarget(targetURL)
@@ -126,6 +132,8 @@ func scanAction(c *cli.Context) error {
 		// Return nil here to let the log message suffice, or return the error string?
 		// Let's return nil for now, the log indicates the issue. User can use JSON output for details.
 		log.Printf("Scan completed with errors (see logs or JSON output for details).")
+	} else if result.ScanStatus == "partial" {
+		log.Println("Scan completed with warnings (see results).")
 	} else {
 		log.Println("Scan completed successfully.")
 	}
@@ -135,22 +143,33 @@ func scanAction(c *cli.Context) error {
 
 // serveAction is the action for the serve command
 func serveAction(c *cli.Context) error {
+	mcpserver.Version = version
 	port := c.Int("port")
 	host := c.String("host")
-	
+
 	log.Printf("Starting MCP server on %s:%d", host, port)
 	log.Printf("The server accepts nextr4y scan requests via MCP protocol")
-	
+
 	// Create and start the MCP server
 	server := mcpserver.NewMCPServer(host, port)
-	return server.Start()
+	switch c.String("transport") {
+	case "stdio":
+		return server.StartStdio()
+	case "http":
+		return server.Start()
+	default:
+		return cli.Exit("--transport must be http or stdio", 1)
+	}
 }
 
 func main() {
-	printBanner() // Print the banner first
+	// Print the banner only for human-readable scan output.
 
 	// Common flags for scan command
 	scanFlags := []cli.Flag{
+		&cli.IntFlag{Name: "crawl-pages", Usage: "Fetch up to N additional discovered pages to map observed assets (0-32)", Value: 0},
+		&cli.BoolFlag{Name: "rsc", Usage: "Probe an RSC response independently of HTML detection"},
+		&cli.BoolFlag{Name: "sitemap", Usage: "Discover additional same-origin URLs from /sitemap.xml (up to 256)"},
 		&cli.StringFlag{
 			Name:    "output",
 			Aliases: []string{"o"},
@@ -179,6 +198,7 @@ func main() {
 
 	// Serve command flags
 	serveFlags := []cli.Flag{
+		&cli.StringFlag{Name: "transport", Value: "http", Usage: "MCP transport: http (/mcp plus legacy /sse) or stdio"},
 		&cli.IntFlag{
 			Name:    "port",
 			Aliases: []string{"p"},
@@ -186,9 +206,9 @@ func main() {
 			Usage:   "Port for the MCP server",
 		},
 		&cli.StringFlag{
-			Name:    "host",
-			Value:   "0.0.0.0",
-			Usage:   "Host for the MCP server",
+			Name:  "host",
+			Value: "127.0.0.1",
+			Usage: "Host for the MCP server",
 		},
 	}
 
@@ -235,4 +255,4 @@ func main() {
 	if err != nil {
 		log.Fatal(err) // Log fatal errors from cli itself
 	}
-} 
+}
